@@ -10,6 +10,7 @@ from pathlib import Path
 from PIL import Image, ImageTk, ImageDraw, ImageFont
 import ipaddress
 from queue import Queue
+import winsound  # Только для Windows
 
 
 # Константы
@@ -23,6 +24,7 @@ CONFIG_KEY_USERNAME = 'username'
 CONFIG_KEY_PASSWORD = 'password'
 CONFIG_KEY_MOTION_SENSITIVITY = 'motion_sensitivity'
 CONFIG_KEY_STREAM_PATH = 'stream_path'
+CONFIG_KEY_IGNORE_MASK = 'ignore_mask'  # Новое: зоны игнорирования
 
 SECRET_CONFIG_SECTION = 'SecretPaths'
 SECRET_CONFIG_KEY_PATH = 'secret_path'
@@ -63,6 +65,9 @@ class CameraApp:
         self.password = ''
         self.stream_path = '/stream1'
         self.motion_sensitivity = MOTION_DEFAULT_SENSITIVITY
+        self.ignore_mask_rects = []  # [(x1, y1, x2, y2), ...] — в координатах оригинального кадра
+        self.sound_file = ""
+        self.alert_window = None  # Для замены предыдущего окна предупреждения
 
         self.is_running = False
         self.cap = None
@@ -113,6 +118,20 @@ class CameraApp:
                 self.motion_sensitivity = config[CONFIG_SECTION].getint(
                     CONFIG_KEY_MOTION_SENSITIVITY, MOTION_DEFAULT_SENSITIVITY
                 )
+                self.sound_file = config[CONFIG_SECTION].get('sound_file', '')
+                mask_str = config[CONFIG_SECTION].get(CONFIG_KEY_IGNORE_MASK, '')
+                self.ignore_mask_rects = []
+                if mask_str:
+                    try:
+                        rects = []
+                        for part in mask_str.split(';'):
+                            if part.strip():
+                                coords = list(map(int, part.strip().split(',')))
+                                if len(coords) == 4:
+                                    rects.append(tuple(coords))
+                        self.ignore_mask_rects = rects
+                    except Exception as e:
+                        print(f"Ошибка загрузки маски: {e}")
         else:
             self.save_secret_settings()
 
@@ -126,7 +145,11 @@ class CameraApp:
             CONFIG_KEY_USERNAME: str(self.username),
             CONFIG_KEY_PASSWORD: str(self.password),
             CONFIG_KEY_STREAM_PATH: str(self.stream_path),
-            CONFIG_KEY_MOTION_SENSITIVITY: str(self.motion_sensitivity)
+            CONFIG_KEY_MOTION_SENSITIVITY: str(self.motion_sensitivity),
+            'sound_file': str(self.sound_file),
+            CONFIG_KEY_IGNORE_MASK: ';'.join(
+                f"{x1},{y1},{x2},{y2}" for (x1, y1, x2, y2) in self.ignore_mask_rects
+            )
         }
         try:
             secret_dir = os.path.dirname(self.secret_settings_path)
@@ -146,6 +169,18 @@ class CameraApp:
             width=12
         )
         self.btn_settings.pack(side=tk.LEFT, padx=3)
+
+        self.btn_detection = ttk.Button(
+            btn_frame, text="Детекции", command=self.open_detection_window,
+            width=12
+        )
+        self.btn_detection.pack(side=tk.LEFT, padx=3)
+
+        self.btn_sound = ttk.Button(
+            btn_frame, text="Звук", command=self.open_sound_settings,
+            width=12
+        )
+        self.btn_sound.pack(side=tk.LEFT, padx=3)
 
         self.btn_start = ttk.Button(
             btn_frame, text="Старт", command=self.start_stream,
@@ -457,6 +492,187 @@ class CameraApp:
         except Exception as e:
             self.message_queue.put(("error", f"Ошибка в настройках:\n{e}"))
 
+    def open_detection_window(self):
+        if self.last_frame is None:
+            messagebox.showwarning("Предупреждение", "Нет доступного кадра для настройки зон детекции.")
+            return
+
+        detection_win = Toplevel(self.root)
+        detection_win.title("Зоны игнорирования движения")
+        detection_win.geometry("800x600")
+        detection_win.transient(self.root)
+        detection_win.grab_set()
+
+        # Получаем оригинальные размеры кадра
+        orig_h, orig_w = self.last_frame.shape[:2]
+
+        # Фрейм и канвас
+        canvas_frame = tk.Frame(detection_win)
+        canvas_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        canvas = tk.Canvas(canvas_frame, bg="black", highlightthickness=0)
+        canvas.pack(fill=tk.BOTH, expand=True)
+
+        # Переменные масштабирования
+        scale = 1.0
+        offset_x = 0
+        offset_y = 0
+        canvas_img = None
+        displayed_rects = []  # для отображения уже сохранённых зон
+
+        def redraw_canvas():
+            nonlocal canvas_img, scale, offset_x, offset_y, displayed_rects
+
+            # Очищаем канвас
+            canvas.delete("all")
+            displayed_rects.clear()
+
+            # Размеры канваса
+            cw = canvas.winfo_width()
+            ch = canvas.winfo_height()
+            if cw <= 1 or ch <= 1:
+                return
+
+            # Вычисляем масштаб с сохранением пропорций
+            scale_w = cw / orig_w
+            scale_h = ch / orig_h
+            scale = min(scale_w, scale_h)
+            new_w = int(orig_w * scale)
+            new_h = int(orig_h * scale)
+
+            offset_x = (cw - new_w) // 2
+            offset_y = (ch - new_h) // 2
+
+            # Преобразуем кадр в PIL и масштабируем
+            frame_rgb = cv2.cvtColor(self.last_frame, cv2.COLOR_BGR2RGB)
+            img_pil = Image.fromarray(frame_rgb)
+            img_resized = img_pil.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            canvas_img = ImageTk.PhotoImage(img_resized)
+            canvas.create_image(offset_x, offset_y, anchor=tk.NW, image=canvas_img)
+
+            # Отображаем уже сохранённые зоны
+            for (x1, y1, x2, y2) in self.ignore_mask_rects:
+                sx1 = offset_x + x1 * scale
+                sy1 = offset_y + y1 * scale
+                sx2 = offset_x + x2 * scale
+                sy2 = offset_y + y2 * scale
+                rect_id = canvas.create_rectangle(sx1, sy1, sx2, sy2, outline='yellow', width=2, stipple='gray50')
+                displayed_rects.append(rect_id)
+
+        # Изначальная отрисовка
+        detection_win.update_idletasks()  # чтобы получить актуальные размеры
+        redraw_canvas()
+
+        # Рисование новой зоны
+        rect_id = None
+        start_x = start_y = 0
+
+        def canvas_to_frame_coords(cx, cy):
+            """Преобразует координаты канваса → координаты оригинального кадра."""
+            fx = max(0, min(orig_w - 1, int((cx - offset_x) / scale)))
+            fy = max(0, min(orig_h - 1, int((cy - offset_y) / scale)))
+            return fx, fy
+
+        def on_button_press(event):
+            nonlocal start_x, start_y, rect_id
+            start_x, start_y = event.x, event.y
+            if rect_id:
+                canvas.delete(rect_id)
+            rect_id = canvas.create_rectangle(start_x, start_y, start_x, start_y, outline='red', width=2)
+
+        def on_mouse_move(event):
+            nonlocal rect_id
+            if rect_id:
+                canvas.coords(rect_id, start_x, start_y, event.x, event.y)
+
+        def on_button_release(event):
+            nonlocal rect_id
+            if rect_id:
+                x1_canvas, y1_canvas = start_x, start_y
+                x2_canvas, y2_canvas = event.x, event.y
+
+                # Преобразуем в координаты кадра
+                fx1, fy1 = canvas_to_frame_coords(x1_canvas, y1_canvas)
+                fx2, fy2 = canvas_to_frame_coords(x2_canvas, y2_canvas)
+
+                # Нормализуем
+                fx1, fx2 = sorted([fx1, fx2])
+                fy1, fy2 = sorted([fy1, fy2])
+
+                # Игнорируем слишком маленькие зоны
+                if fx2 - fx1 < 5 or fy2 - fy1 < 5:
+                    canvas.delete(rect_id)
+                    rect_id = None
+                    return
+
+                self.ignore_mask_rects.append((fx1, fy1, fx2, fy2))
+                redraw_canvas()  # перерисовываем всё, включая новую зону
+                rect_id = None
+
+        canvas.bind("<ButtonPress-1>", on_button_press)
+        canvas.bind("<B1-Motion>", on_mouse_move)
+        canvas.bind("<ButtonRelease-1>", on_button_release)
+
+        # Кнопки управления
+        control_frame = tk.Frame(detection_win)
+        control_frame.pack(pady=10)
+
+        def clear_all():
+            self.ignore_mask_rects.clear()
+            redraw_canvas()
+
+        def apply_and_close():
+            self.save_secret_settings()
+            detection_win.destroy()
+
+        tk.Button(control_frame, text="Очистить всё", command=clear_all).pack(side=tk.LEFT, padx=5)
+        tk.Button(control_frame, text="Применить", command=apply_and_close, bg="lightgreen").pack(side=tk.LEFT, padx=5)
+        tk.Button(control_frame, text="Отмена", command=detection_win.destroy).pack(side=tk.LEFT, padx=5)
+
+        tk.Label(detection_win, text="Нарисуйте прямоугольники — в них движение игнорируется", fg="blue").pack(pady=(5, 0))
+
+        # Обновляем при изменении размера окна
+        def on_resize(event):
+            if event.widget == detection_win:
+                detection_win.after(50, redraw_canvas)
+
+        detection_win.bind("<Configure>", on_resize)
+
+    def open_sound_settings(self):
+        sound_win = Toplevel(self.root)
+        sound_win.title("Настройка звука")
+        sound_win.geometry("400x150")
+        sound_win.transient(self.root)
+        sound_win.grab_set()
+
+        tk.Label(sound_win, text="Звук при детекции движения:", anchor="w").pack(fill=tk.X, padx=20, pady=(10,5))
+
+        sound_path_var = tk.StringVar(value=self.sound_file)
+        entry = tk.Entry(sound_win, textvariable=sound_path_var, state='readonly')
+        entry.pack(fill=tk.X, padx=20, pady=5)
+
+        def choose_sound():
+            path = filedialog.askopenfilename(
+                title="Выберите звуковой файл (.wav)",
+                filetypes=[("WAV files", "*.wav"), ("All files", "*.*")]
+            )
+            if path:
+                sound_path_var.set(path)
+                self.sound_file = path
+
+        tk.Button(sound_win, text="Обзор...", command=choose_sound).pack(pady=5)
+
+        def save_sound():
+            self.sound_file = sound_path_var.get()
+            self.save_secret_settings()
+            sound_win.destroy()
+            self.message_queue.put(("info", "Звук настроен!"))
+
+        btn_frame = tk.Frame(sound_win)
+        btn_frame.pack(pady=10)
+        tk.Button(btn_frame, text="Сохранить", command=save_sound, width=10).pack(side=tk.LEFT, padx=5)
+        tk.Button(btn_frame, text="Отмена", command=sound_win.destroy, width=10).pack(side=tk.LEFT, padx=5)
+
     def show_info(self):
         info_text = (
             f"Программа Nexora {APP_VERSION}\n"
@@ -465,6 +681,8 @@ class CameraApp:
             "• Поддержка подключения к IP-камерам по RTSP/HTTP или к встроенной веб-камере.\n"
             "• Обнаружение движения на основе анализа изменений в кадре.\n"
             "• Настройка чувствительности детектора движения.\n"
+            "• Возможность задать зоны игнорирования движения.\n"
+            "• Воспроизведение звука при срабатывании.\n"
             "• Сохранение и загрузка конфигураций подключения в файл.\n"
             "• Отображение статуса подключения и журнала событий.\n"
             "• Простой и интуитивно понятный интерфейс.\n\n"
@@ -500,14 +718,45 @@ class CameraApp:
         self.status_label.config(text=f"Настройки: {self.secret_settings_path}", fg="blue")
         self.message_queue.put(("log", "Видеопоток остановлен"))
 
+    def show_motion_alert(self):
+        # Закрываем предыдущее окно, если оно открыто
+        if self.alert_window and self.alert_window.winfo_exists():
+            self.alert_window.destroy()
+
+        self.alert_window = Toplevel(self.root)
+        self.alert_window.title("⚠️ Движение!")
+        self.alert_window.geometry("300x120")
+        self.alert_window.resizable(False, False)
+        self.alert_window.transient(self.root)
+        self.alert_window.grab_set()
+        self.alert_window.protocol("WM_DELETE_WINDOW", lambda: self.alert_window.destroy())
+
+        tk.Label(
+            self.alert_window,
+            text="⚠️ ОБНАРУЖЕНО ДВИЖЕНИЕ! ⚠️",
+            font=("Arial", 12, "bold"),
+            fg="red",
+            pady=20
+        ).pack()
+
+        tk.Button(
+            self.alert_window,
+            text="OK",
+            command=self.alert_window.destroy,
+            width=10
+        ).pack()
+
+        # Воспроизведение звука
+        if self.sound_file and os.path.exists(self.sound_file):
+            try:
+                winsound.PlaySound(self.sound_file, winsound.SND_FILENAME | winsound.SND_ASYNC)
+            except Exception as e:
+                self.message_queue.put(("log", f"Не удалось воспроизвести звук: {e}"))
+
     def on_closing(self):
         self.stop_stream()
         time.sleep(0.2)
         self.root.destroy()
-
-    def show_motion_alert(self):
-        self.message_queue.put(("warning", "⚠️ ОБНАРУЖЕНО ДВИЖЕНИЕ! ⚠️"))
-        self.message_queue.put(("log", "ДЕТЕКЦИЯ ДВИЖЕНИЯ!"))
 
     def video_loop(self):
         actual_url = self.get_actual_camera_url()
@@ -556,7 +805,25 @@ class CameraApp:
                 thresh = cv2.dilate(thresh, None, iterations=2)
                 contours, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-                motion_detected = any(cv2.contourArea(contour) >= self.motion_sensitivity for contour in contours)
+                motion_detected = False
+                for contour in contours:
+                    if cv2.contourArea(contour) < self.motion_sensitivity:
+                        continue
+
+                    # Получаем bounding box контура
+                    x, y, w, h = cv2.boundingRect(contour)
+                    cx, cy = x + w // 2, y + h // 2  # центр контура
+
+                    # Проверяем, попадает ли центр в зону игнорирования
+                    in_ignored_zone = False
+                    for (x1, y1, x2, y2) in self.ignore_mask_rects:
+                        if x1 <= cx <= x2 and y1 <= cy <= y2:
+                            in_ignored_zone = True
+                            break
+
+                    if not in_ignored_zone:
+                        motion_detected = True
+                        break
 
                 if motion_detected and not motion_detected_recently:
                     self.show_motion_alert()
