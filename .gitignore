@@ -1,0 +1,29 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs and databases
+*.log
+*.db
+
+# OS
+.DS_Store
+Thumbs.db
+settings.ini
+
+# Executables (if you build .exe later)
+dist/
+build/
+*.exe
+*.spec
+
+# Local config (optional — но лучше не коммитить)
+# settings.ini
+# ~/nexora_secret_settings.ini — не в репозитории по умолчанию
