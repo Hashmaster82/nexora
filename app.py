@@ -38,18 +38,19 @@ class CameraApp:
         self.root.geometry("800x650")
         self.root.resizable(True, True)
 
-        # Установка иконки
+        # Определяем директорию приложения
         if getattr(sys, 'frozen', False):
             self.app_dir = os.path.dirname(sys.executable)
         else:
             self.app_dir = os.path.dirname(os.path.abspath(__file__))
 
+        # Установка иконки, если файл существует
         icon_path = os.path.join(self.app_dir, "app.ico")
         if os.path.exists(icon_path):
             try:
                 self.root.iconbitmap(icon_path)
             except Exception as e:
-                print(f"Не удалось загрузить иконку: {e}")
+                print(f"Предупреждение: не удалось загрузить иконку: {e}")
 
         self.main_settings_path = os.path.join(self.app_dir, "settings.ini")
         self.secret_settings_path = None
@@ -134,7 +135,7 @@ class CameraApp:
             with open(self.secret_settings_path, 'w', encoding='utf-8') as f:
                 config.write(f)
         except Exception as e:
-            self.message_queue.put(("error", f"Не удалось сохранить секретные настройки:\n{e}"))
+            self.message_queue.put(("error", f"Не удалось сохранить настройки:\n{e}"))
 
     def setup_ui(self):
         btn_frame = tk.Frame(self.root)
@@ -165,16 +166,19 @@ class CameraApp:
         self.btn_info.pack(side=tk.LEFT, padx=3)
 
         self.status_label = tk.Label(
-            self.root, text=f"Секретные настройки: {self.secret_settings_path}", fg="blue", anchor="w"
+            self.root, text=f"Настройки: {self.secret_settings_path}", fg="blue", anchor="w"
         )
         self.status_label.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=2)
 
-        # Лог-панель — только одна строка
+        # Лог-панель — только одна строка (последнее сообщение)
         log_frame = tk.Frame(self.root)
         log_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=(0, 5))
         tk.Label(log_frame, text="Журнал:", anchor="w").pack(fill=tk.X)
         self.log_var = tk.StringVar()
-        self.log_label = tk.Label(log_frame, textvariable=self.log_var, bg="#f0f0f0", anchor="w", relief="sunken", padx=5)
+        self.log_label = tk.Label(
+            log_frame, textvariable=self.log_var,
+            bg="#f0f0f0", anchor="w", relief="sunken", padx=5, pady=2
+        )
         self.log_label.pack(fill=tk.X, expand=False)
 
         self.video_label = tk.Label(self.root, text="Видео будет здесь", bg="black", fg="white")
@@ -229,13 +233,14 @@ class CameraApp:
             user_pass = f"{self.username}:{self.password}@" if (self.username or self.password) else ""
             return f"rtsp://{user_pass}{self.ip}:{self.port}{self.stream_path}"
 
-    def choose_secret_path(self, path_var, entry_widget):
+    def choose_secret_path(self, path_var, entry_widget, settings_win):
+        """Выбор файла настроек. Если файл существует — загружаем его содержимое в форму."""
         current = path_var.get()
         initial_dir = os.path.dirname(current) if os.path.exists(current) else os.path.expanduser("~")
         initial_file = os.path.basename(current) if os.path.exists(current) else "nexora_secret_settings.ini"
 
         path = filedialog.asksaveasfilename(
-            title="Выберите место для хранения секретных настроек",
+            title="Выберите файл для хранения настроек подключения",
             defaultextension=".ini",
             filetypes=[("INI files", "*.ini"), ("All files", "*.*")],
             initialdir=initial_dir,
@@ -248,6 +253,49 @@ class CameraApp:
             entry_widget.insert(0, path)
             entry_widget.config(state='readonly')
 
+            # Если файл существует — загружаем настройки в форму
+            if os.path.exists(path):
+                self.load_settings_into_form(path, settings_win)
+
+    def load_settings_into_form(self, path, settings_win):
+        """Загружает настройки из INI-файла и обновляет поля в окне настроек."""
+        config = configparser.ConfigParser()
+        try:
+            config.read(path, encoding='utf-8')
+            if CONFIG_SECTION in config:
+                mode = config[CONFIG_SECTION].get(CONFIG_KEY_CONNECTION_MODE, 'url')
+                url = config[CONFIG_SECTION].get(CONFIG_KEY_URL, '0')
+                ip = config[CONFIG_SECTION].get(CONFIG_KEY_IP, '192.168.1.64')
+                port = config[CONFIG_SECTION].get(CONFIG_KEY_PORT, '554')
+                username = config[CONFIG_SECTION].get(CONFIG_KEY_USERNAME, 'admin')
+                password = config[CONFIG_SECTION].get(CONFIG_KEY_PASSWORD, '')
+                stream_path = config[CONFIG_SECTION].get(CONFIG_KEY_STREAM_PATH, '/stream1')
+                sensitivity = config[CONFIG_SECTION].getint(CONFIG_KEY_MOTION_SENSITIVITY, MOTION_DEFAULT_SENSITIVITY)
+
+                # Обновляем переменные
+                settings_win.mode_var.set(mode)
+                settings_win.url_var.set(url)
+                settings_win.ip_var.set(ip)
+                settings_win.port_var.set(port)
+                settings_win.user_var.set(username)
+                settings_win.pass_var.set(password)
+                settings_win.stream_path_var.set(stream_path)
+                settings_win.sens_var.set(sensitivity)
+
+                # Обновляем отображение фреймов
+                if mode == 'url':
+                    settings_win.url_frame.pack(fill=tk.X, padx=20, pady=5)
+                    settings_win.params_frame.pack_forget()
+                else:
+                    settings_win.url_frame.pack_forget()
+                    settings_win.params_frame.pack(fill=tk.X, padx=20, pady=5)
+
+                # Обновляем метку чувствительности
+                settings_win.sens_value_label.config(text=f"Текущее значение: {sensitivity}")
+
+        except Exception as e:
+            self.message_queue.put(("error", f"Не удалось загрузить настройки из файла:\n{e}"))
+
     def toggle_connection_mode(self, mode, url_frame, params_frame):
         if mode == 'url':
             url_frame.pack(fill=tk.X, padx=20, pady=5)
@@ -259,11 +307,12 @@ class CameraApp:
     def open_settings_window(self):
         settings_win = Toplevel(self.root)
         settings_win.title("Настройки подключения")
-        settings_win.geometry("500x650")
+        settings_win.geometry("500x600")
         settings_win.resizable(False, False)
         settings_win.transient(self.root)
         settings_win.grab_set()
 
+        # Переменные для привязки к виджетам
         secret_path_var = tk.StringVar(value=self.secret_settings_path)
         mode_var = tk.StringVar(value=self.connection_mode)
         url_var = tk.StringVar(value=str(self.camera_url))
@@ -274,38 +323,27 @@ class CameraApp:
         stream_path_var = tk.StringVar(value=self.stream_path)
         sens_var = tk.IntVar(value=self.motion_sensitivity)
 
-        # Секретный файл
-        tk.Label(settings_win, text="Файл секретных настроек:", anchor="w").pack(fill=tk.X, padx=20, pady=(10, 5))
+        # Сохраняем ссылки в окне для удобства доступа
+        settings_win.mode_var = mode_var
+        settings_win.url_var = url_var
+        settings_win.ip_var = ip_var
+        settings_win.port_var = port_var
+        settings_win.user_var = user_var
+        settings_win.pass_var = pass_var
+        settings_win.stream_path_var = stream_path_var
+        settings_win.sens_var = sens_var
+
+        # Путь к файлу настроек
+        tk.Label(settings_win, text="Файл настроек подключения:", anchor="w").pack(fill=tk.X, padx=20, pady=(10, 5))
         secret_frame = tk.Frame(settings_win)
         secret_frame.pack(fill=tk.X, padx=20)
         secret_entry = tk.Entry(secret_frame, textvariable=secret_path_var, state='readonly')
         secret_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        tk.Button(secret_frame, text="Обзор...", command=lambda: self.choose_secret_path(secret_path_var, secret_entry),
-                  width=8).pack(side=tk.RIGHT, padx=(5, 0))
-
-        # Кнопки для выбора: новая настройка или загрузка существующей
-        tk.Frame(settings_win, height=2, bg="gray").pack(fill=tk.X, padx=20, pady=10)
-        tk.Label(settings_win, text="Выберите действие:", anchor="w").pack(fill=tk.X, padx=20, pady=(5, 0))
-        action_var = tk.StringVar(value="new")
-        tk.Radiobutton(settings_win, text="Создать/сохранить новые настройки", variable=action_var, value="new").pack(anchor="w", padx=20)
-        tk.Radiobutton(settings_win, text="Загрузить существующие настройки", variable=action_var, value="load").pack(anchor="w", padx=20)
-
-        def on_load_existing():
-            path = filedialog.askopenfilename(
-                title="Выберите файл настроек",
-                filetypes=[("INI files", "*.ini"), ("All files", "*.*")],
-                initialdir=os.path.dirname(secret_path_var.get()) or os.path.expanduser("~")
-            )
-            if path:
-                secret_path_var.set(path)
-                secret_entry.config(state='normal')
-                secret_entry.delete(0, tk.END)
-                secret_entry.insert(0, path)
-                secret_entry.config(state='readonly')
-                # Загружаем настройки для предпросмотра
-                self.temp_load_settings_for_preview(path, mode_var, url_var, ip_var, port_var, user_var, pass_var, stream_path_var, sens_var)
-
-        tk.Button(settings_win, text="Загрузить файл...", command=on_load_existing, state=tk.NORMAL).pack(pady=5)
+        tk.Button(
+            secret_frame, text="Обзор...",
+            command=lambda: self.choose_secret_path(secret_path_var, secret_entry, settings_win),
+            width=8
+        ).pack(side=tk.RIGHT, padx=(5, 0))
 
         tk.Frame(settings_win, height=2, bg="gray").pack(fill=tk.X, padx=20, pady=10)
 
@@ -315,19 +353,19 @@ class CameraApp:
         radio_frame.pack(fill=tk.X, padx=20, pady=5)
         tk.Radiobutton(
             radio_frame, text="Прямой URL", variable=mode_var, value='url',
-            command=lambda: self.toggle_connection_mode('url', url_frame, params_frame)
+            command=lambda: self.toggle_connection_mode('url', settings_win.url_frame, settings_win.params_frame)
         ).pack(side=tk.LEFT)
         tk.Radiobutton(
             radio_frame, text="Параметры камеры", variable=mode_var, value='params',
-            command=lambda: self.toggle_connection_mode('params', url_frame, params_frame)
+            command=lambda: self.toggle_connection_mode('params', settings_win.url_frame, settings_win.params_frame)
         ).pack(side=tk.LEFT, padx=(20, 0))
 
-        # URL
+        # URL-фрейм
         url_frame = tk.Frame(settings_win)
         tk.Label(url_frame, text="URL видеопотока (0 — веб-камера):").pack(anchor="w")
         tk.Entry(url_frame, textvariable=url_var).pack(fill=tk.X, pady=(5, 0))
 
-        # Параметры
+        # Параметры камеры
         params_frame = tk.Frame(settings_win)
         tk.Label(params_frame, text="IP-адрес:").grid(row=0, column=0, sticky="w", pady=2)
         tk.Entry(params_frame, textvariable=ip_var, width=20).grid(row=0, column=1, padx=(10, 0), pady=2)
@@ -344,16 +382,21 @@ class CameraApp:
         tk.Label(params_frame, text="Путь потока:").grid(row=4, column=0, sticky="w", pady=2)
         tk.Entry(params_frame, textvariable=stream_path_var, width=20).grid(row=4, column=1, padx=(10, 0), pady=2)
 
+        settings_win.url_frame = url_frame
+        settings_win.params_frame = params_frame
+
         if mode_var.get() == 'url':
             url_frame.pack(fill=tk.X, padx=20, pady=5)
         else:
             params_frame.pack(fill=tk.X, padx=20, pady=5)
 
-        # Чувствительность
+        # Чувствительность движения
         tk.Frame(settings_win, height=2, bg="gray").pack(fill=tk.X, padx=20, pady=10)
         tk.Label(settings_win, text="Чувствительность движения:", anchor="w").pack(fill=tk.X, padx=20)
         sens_value_label = tk.Label(settings_win, text=f"Текущее значение: {sens_var.get()}")
         sens_value_label.pack(pady=(0, 5))
+        settings_win.sens_value_label = sens_value_label
+
         sens_scale = tk.Scale(
             settings_win,
             from_=50,
@@ -369,30 +412,18 @@ class CameraApp:
         # Кнопки
         btn_frame = tk.Frame(settings_win)
         btn_frame.pack(pady=15)
-        tk.Button(btn_frame, text="Сохранить", command=lambda: self.apply_settings(
-            settings_win, secret_path_var.get(), mode_var.get(), url_var.get(),
-            ip_var.get(), port_var.get(), user_var.get(), pass_var.get(),
-            stream_path_var.get(), sens_var.get(), action_var.get()
-        ), width=10).pack(side=tk.LEFT, padx=5)
+        tk.Button(
+            btn_frame, text="Сохранить",
+            command=lambda: self.apply_settings(
+                settings_win, secret_path_var.get(), mode_var.get(), url_var.get(),
+                ip_var.get(), port_var.get(), user_var.get(), pass_var.get(),
+                stream_path_var.get(), sens_var.get()
+            ),
+            width=10
+        ).pack(side=tk.LEFT, padx=5)
         tk.Button(btn_frame, text="Отмена", command=settings_win.destroy, width=10).pack(side=tk.LEFT, padx=5)
 
-    def temp_load_settings_for_preview(self, path, mode_var, url_var, ip_var, port_var, user_var, pass_var, stream_path_var, sens_var):
-        config = configparser.ConfigParser()
-        try:
-            config.read(path, encoding='utf-8')
-            if CONFIG_SECTION in config:
-                mode_var.set(config[CONFIG_SECTION].get(CONFIG_KEY_CONNECTION_MODE, 'url'))
-                url_var.set(config[CONFIG_SECTION].get(CONFIG_KEY_URL, '0'))
-                ip_var.set(config[CONFIG_SECTION].get(CONFIG_KEY_IP, '192.168.1.64'))
-                port_var.set(config[CONFIG_SECTION].get(CONFIG_KEY_PORT, '554'))
-                user_var.set(config[CONFIG_SECTION].get(CONFIG_KEY_USERNAME, 'admin'))
-                pass_var.set(config[CONFIG_SECTION].get(CONFIG_KEY_PASSWORD, ''))
-                stream_path_var.set(config[CONFIG_SECTION].get(CONFIG_KEY_STREAM_PATH, '/stream1'))
-                sens_var.set(config[CONFIG_SECTION].getint(CONFIG_KEY_MOTION_SENSITIVITY, MOTION_DEFAULT_SENSITIVITY))
-        except Exception as e:
-            self.message_queue.put(("error", f"Не удалось загрузить настройки для предпросмотра:\n{e}"))
-
-    def apply_settings(self, window, secret_path, mode, url, ip, port, username, password, stream_path, sensitivity, action):
+    def apply_settings(self, window, secret_path, mode, url, ip, port, username, password, stream_path, sensitivity):
         try:
             if mode == 'params':
                 if not port.isdigit():
@@ -407,47 +438,40 @@ class CameraApp:
                 if u not in ('0', '1') and not (u.startswith('http://') or u.startswith('https://') or u.startswith('rtsp://')):
                     raise ValueError("URL должен начинаться с http://, https:// или rtsp://")
 
-            if action == "new":
-                self.secret_settings_path = secret_path
-                self.connection_mode = mode
-                self.camera_url = url
-                self.ip = ip
-                self.port = port
-                self.username = username
-                self.password = password
-                self.stream_path = stream_path
-                self.motion_sensitivity = sensitivity
+            self.secret_settings_path = secret_path
+            self.connection_mode = mode
+            self.camera_url = url
+            self.ip = ip
+            self.port = port
+            self.username = username
+            self.password = password
+            self.stream_path = stream_path
+            self.motion_sensitivity = sensitivity
 
-                self.save_secret_settings()
-                self.save_main_settings()
+            self.save_secret_settings()
+            self.save_main_settings()
 
-                self.status_label.config(text=f"Секретные настройки: {self.secret_settings_path}", fg="green")
-                self.message_queue.put(("info", "Настройки сохранены!"))
-            elif action == "load":
-                if not os.path.exists(secret_path):
-                    raise ValueError("Указанный файл настроек не существует")
-                self.secret_settings_path = secret_path
-                self.load_secret_settings()
-                self.status_label.config(text=f"Секретные настройки: {self.secret_settings_path}", fg="green")
-                self.message_queue.put(("info", "Настройки загружены!"))
-
+            self.status_label.config(text=f"Настройки: {self.secret_settings_path}", fg="green")
+            self.message_queue.put(("info", "Настройки успешно сохранены!"))
             window.destroy()
         except Exception as e:
-            self.message_queue.put(("error", f"Неверные данные:\n{e}"))
+            self.message_queue.put(("error", f"Ошибка в настройках:\n{e}"))
 
     def show_info(self):
         info_text = (
             f"Программа Nexora {APP_VERSION}\n"
             f"Автор: {AUTHOR}\n\n"
-            "Функции программы:\n"
-            "• Поддержка подключения к IP-камерам по RTSP или HTTP.\n"
-            "• Возможность использовать встроенную веб-камеру (устройство 0).\n"
-            "• Обнаружение движения на основе анализа кадров.\n"
+            "Основные функции:\n"
+            "• Поддержка подключения к IP-камерам по RTSP/HTTP или к встроенной веб-камере.\n"
+            "• Обнаружение движения на основе анализа изменений в кадре.\n"
             "• Настройка чувствительности детектора движения.\n"
-            "• Сохранение и загрузка конфигураций подключения.\n"
-            "• Журнал событий в реальном времени.\n"
+            "• Сохранение и загрузка конфигураций подключения в файл.\n"
+            "• Отображение статуса подключения и журнала событий.\n"
             "• Простой и интуитивно понятный интерфейс.\n\n"
-            "Используйте кнопку 'Настройки' для конфигурации подключения."
+            "Рекомендации:\n"
+            "• Для IP-камер укажите корректные IP, порт, логин и путь потока.\n"
+            "• При использовании веб-камеры введите '0' в поле URL.\n"
+            "• Настройки сохраняются автоматически в выбранный INI-файл."
         )
         messagebox.showinfo("О программе", info_text)
 
@@ -473,7 +497,7 @@ class CameraApp:
         self.btn_start.config(state=tk.NORMAL)
         self.btn_stop.config(state=tk.DISABLED)
         self.video_label.config(image='', text="Видео остановлено")
-        self.status_label.config(text=f"Секретные настройки: {self.secret_settings_path}", fg="blue")
+        self.status_label.config(text=f"Настройки: {self.secret_settings_path}", fg="blue")
         self.message_queue.put(("log", "Видеопоток остановлен"))
 
     def on_closing(self):
@@ -552,17 +576,16 @@ class CameraApp:
 
                 draw = ImageDraw.Draw(img_pil)
                 try:
-                    # Используем крупный шрифт для заметности
-                    font = ImageFont.truetype("arialbd.ttf", 36)  # Жирный Arial
+                    font = ImageFont.truetype("arialbd.ttf", 36)
                 except:
                     try:
                         font = ImageFont.truetype("arial.ttf", 32)
                     except:
                         font = ImageFont.load_default()
 
-                # Добавляем чёрный прямоугольник под текст для контраста
+                # Подложка для текста
                 text_bbox = draw.textbbox((10, 10), status_text, font=font)
-                draw.rectangle(text_bbox, fill=(0, 0, 0, 180))
+                draw.rectangle(text_bbox, fill=(0, 0, 0, 200))
                 draw.text((10, 10), status_text, fill=color, font=font)
 
                 img_tk = ImageTk.PhotoImage(image=img_pil)

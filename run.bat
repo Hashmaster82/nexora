@@ -2,7 +2,7 @@
 setlocal
 
 echo ========================================
-echo  Nexora — Auto-update and Launch
+echo  Nexora Auto-update and Launch
 echo ========================================
 echo.
 
