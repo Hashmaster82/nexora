@@ -838,7 +838,7 @@ class CameraApp:
                 img_pil = Image.fromarray(frame_rgb)
                 img_pil.thumbnail((label_width, label_height), Image.Resampling.LANCZOS)
 
-                status_text = "ДЕТЕКЦИЯ ДВИЖЕНИЯ!" if motion_detected else "Спокойно"
+                status_text = "DETECTION" if motion_detected else "Green"
                 color = (255, 0, 0) if motion_detected else (0, 255, 0)
 
                 draw = ImageDraw.Draw(img_pil)
